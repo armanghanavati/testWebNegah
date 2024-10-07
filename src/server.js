@@ -3,7 +3,7 @@ const cors = require("cors");
 const app = express();
 require("dotenv").config();
 
-const db = require("./db");
+const db = require("./db/db");
 
 const userAuth = require("./routes/authRoute");
 const riminder = require("./routes/reminder");
