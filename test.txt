@@ -1,0 +1,268 @@
+برای پیاده‌سازی این سیستم با دو نقش "ادمین" و "یوزر" و ایجاد ریمایندر با ارسال ایمیل به کاربر، از MongoDB برای ذخیره‌سازی داده‌ها و Express.js برای مدیریت منطق سمت سرور استفاده می‌کنیم. ارسال ایمیل‌ها هم با Mailtrap انجام می‌شود. در اینجا یک ساختار کلی برای پروژه پیشنهاد می‌دهم:
+
+### مراحل پیاده‌سازی:
+
+#### 1. نصب و راه‌اندازی پروژه:
+ابتدا با استفاده از `npm` یا `yarn` یک پروژه جدید ایجاد می‌کنیم و کتابخانه‌های مورد نیاز را نصب می‌کنیم.
+
+```bash
+mkdir reminder-app
+cd reminder-app
+npm init -y
+npm install express mongoose bcryptjs jsonwebtoken mailtrap-node nodemailer
+```
+
+#### 2. راه‌اندازی MongoDB با استفاده از Mongoose
+ابتدا نیاز به تنظیمات اولیه برای اتصال به MongoDB داریم. در فایل `db.js` اتصال به پایگاه داده را انجام می‌دهیم.
+
+```javascript
+// db.js
+const mongoose = require('mongoose');
+
+mongoose.connect('mongodb://localhost:27017/reminder-app', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+});
+
+const db = mongoose.connection;
+db.on('error', console.error.bind(console, 'connection error:'));
+db.once('open', function () {
+    console.log("Connected to MongoDB");
+});
+
+module.exports = db;
+```
+
+#### 3. تعریف مدل‌های MongoDB برای کاربران و ریمایندرها:
+ما نیاز به دو مدل داریم: یک مدل برای کاربران و یک مدل برای ریمایندرها.
+
+```javascript
+// models/User.js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const userSchema = new mongoose.Schema({
+    username: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+    role: { type: String, enum: ['admin', 'user'], required: true },
+});
+
+// برای رمزنگاری پسورد قبل از ذخیره‌سازی
+userSchema.pre('save', async function (next) {
+    if (!this.isModified('password')) return next();
+    this.password = await bcrypt.hash(this.password, 10);
+    next();
+});
+
+module.exports = mongoose.model('User', userSchema);
+```
+
+```javascript
+// models/Reminder.js
+const mongoose = require('mongoose');
+
+const reminderSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    text: { type: String, required: true },
+    date: { type: Date, required: true },
+});
+
+module.exports = mongoose.model('Reminder', reminderSchema);
+```
+
+#### 4. سیستم احراز هویت JWT:
+برای مدیریت دسترسی به منابع از توکن JWT استفاده می‌کنیم. ابتدا یک سیستم ثبت‌نام و ورود ایجاد می‌کنیم.
+
+```javascript
+// routes/auth.js
+const express = require('express');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const User = require('../models/User');
+const router = express.Router();
+
+// Secret Key
+const JWT_SECRET = 'your_jwt_secret_key';
+
+// ثبت‌نام کاربر
+router.post('/register', async (req, res) => {
+    const { username, password, role } = req.body;
+
+    try {
+        const user = new User({ username, password, role });
+        await user.save();
+        res.status(201).send('User registered successfully');
+    } catch (err) {
+        res.status(400).send('Error registering user');
+    }
+});
+
+// ورود کاربر
+router.post('/login', async (req, res) => {
+    const { username, password } = req.body;
+
+    const user = await User.findOne({ username });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+        return res.status(401).send('Invalid credentials');
+    }
+
+    const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
+});
+
+// Middleware برای تأیید JWT
+function authenticateJWT(req, res, next) {
+    const token = req.headers.authorization;
+    if (!token) return res.status(403).send('Access denied');
+
+    try {
+        const decoded = jwt.verify(token.split(' ')[1], JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch {
+        res.status(401).send('Invalid token');
+    }
+}
+
+module.exports = { router, authenticateJWT };
+```
+
+#### 5. روت‌های مدیریت کاربران و ریمایندرها:
+ادمین می‌تواند کاربر اضافه کند و کاربران می‌توانند ریمایندرهای خود را تنظیم کنند.
+
+```javascript
+// routes/admin.js
+const express = require('express');
+const User = require('../models/User');
+const router = express.Router();
+
+// اضافه کردن کاربر توسط ادمین
+router.post('/add-user', async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).send('Access denied');
+    }
+
+    const { username, password, role } = req.body;
+    const user = new User({ username, password, role });
+    await user.save();
+    res.send('User added successfully');
+});
+
+module.exports = router;
+```
+
+```javascript
+// routes/reminder.js
+const express = require('express');
+const Reminder = require('../models/Reminder');
+const router = express.Router();
+
+// اضافه کردن ریمایندر توسط کاربر
+router.post('/add-reminder', async (req, res) => {
+    const { text, date } = req.body;
+    const reminder = new Reminder({
+        userId: req.user.userId,
+        text,
+        date: new Date(date),
+    });
+    await reminder.save();
+    res.send('Reminder set successfully');
+});
+
+module.exports = router;
+```
+
+#### 6. ارسال ایمیل با استفاده از Mailtrap:
+از Mailtrap و Nodemailer برای ارسال ایمیل‌ها استفاده می‌کنیم.
+
+```javascript
+// email.js
+const nodemailer = require('nodemailer');
+
+// تنظیمات Mailtrap
+const transporter = nodemailer.createTransport({
+    host: 'smtp.mailtrap.io',
+    port: 2525,
+    auth: {
+        user: 'your_mailtrap_user',
+        pass: 'your_mailtrap_password',
+    },
+});
+
+const sendReminderEmail = (email, text) => {
+    const mailOptions = {
+        from: 'noreply@example.com',
+        to: email,
+        subject: 'Reminder Notification',
+        text,
+    };
+
+    transporter.sendMail(mailOptions, (err, info) => {
+        if (err) {
+            console.log('Error sending email:', err);
+        } else {
+            console.log('Email sent:', info.response);
+        }
+    });
+};
+
+module.exports = sendReminderEmail;
+```
+
+#### 7. مدیریت ریمایندرها:
+برای ارسال ایمیل‌ها در زمان مشخص، از یک کرون جاب یا سیستم زمان‌بندی مانند `node-cron` می‌توانید استفاده کنید.
+
+```bash
+npm install node-cron
+```
+
+```javascript
+// scheduler.js
+const cron = require('node-cron');
+const Reminder = require('./models/Reminder');
+const sendReminderEmail = require('./email');
+
+// زمان‌بندی برای ارسال ایمیل‌ها
+cron.schedule('* * * * *', async () => {
+    const now = new Date();
+    const reminders = await Reminder.find({ date: { $lte: now } }).populate('userId');
+
+    reminders.forEach(reminder => {
+        sendReminderEmail(reminder.userId.username, reminder.text);
+    });
+
+    // حذف ریمایندرهای ارسال شده
+    await Reminder.deleteMany({ date: { $lte: now } });
+});
+```
+
+#### 8. تنظیم سرور:
+در نهایت فایل اصلی سرور را تنظیم می‌کنیم.
+
+```javascript
+// app.js
+const express = require('express');
+const db = require('./db');
+const { router: authRoutes, authenticateJWT } = require('./routes/auth');
+const adminRoutes = require('./routes/admin');
+const reminderRoutes = require('./routes/reminder');
+require('./scheduler'); // زمان‌بندی ایمیل‌ها
+
+const app = express();
+
+app.use(express.json());
+app.use('/auth', authRoutes);
+app.use('/admin', authenticateJWT, adminRoutes);
+app.use('/reminder', authenticateJWT, reminderRoutes);
+
+app.listen(3000, () => {
+    console.log('Server is running on port 3000');
+});
+```
+
+### نتیجه نهایی:
+- **ادمین** می‌تواند کاربران جدید اضافه کند.
+- **یوزر** می‌تواند وارد سیستم شود و ریمایندرهای خود را تنظیم کند.
+- در زمان مشخص، ریمایندرها از طریق ایمیل ارسال می‌شوند.
+
+این پیاده‌سازی پایه می‌تواند با افزودن ویژگی‌های دیگر مانند اعتبارسنجی ورودی‌ها و مدیریت خطاها بهبود پیدا کند.
