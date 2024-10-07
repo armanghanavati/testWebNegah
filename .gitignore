@@ -6,6 +6,6 @@
 # testing
 /coverage
 opp.js
-
+.gitignore
 # production
 /build
